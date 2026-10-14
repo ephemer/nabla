@@ -104,6 +104,7 @@ class GatherOp(Operation):
         indices = args[1]
         axis = kwargs.get("axis", 0)
         batch_dims = kwargs.get("batch_dims", 0)
+        accumulate = kwargs.get("accumulate", False)
 
         if batch_dims > 0 and axis != batch_dims:
             # Need to permute x so the gather axis is at position batch_dims,
@@ -178,7 +179,7 @@ class GatherOp(Operation):
         axis = kwargs.get("axis", 0)
         from ..creation import zeros_like
 
-        gx = scatter(zeros_like(x), indices, cotangents[0], axis=axis)
+        gx = scatter_add(zeros_like(x), indices, cotangents[0], axis=axis)
         return [gx, None]
 
     def jvp_rule(
@@ -273,6 +274,7 @@ class ScatterOp(Operation):
         updates = args[2]
         axis = kwargs.get("axis", 0)
         batch_dims = kwargs.get("batch_dims", 0)
+        accumulate = kwargs.get("accumulate", False)
 
         if batch_dims > 0 and axis != batch_dims:
             # Permute x and updates so the scatter axis is at position batch_dims,
@@ -301,7 +303,8 @@ class ScatterOp(Operation):
             # Use axis=0 scatter_nd approach on the permuted tensors
             # For batch_dims > 0, we need per-batch scatter
             result = self._scatter_at_axis(
-                x_perm, idx, updates_perm, axis=batch_dims, batch_dims=batch_dims
+                x_perm, idx, updates_perm, axis=batch_dims, batch_dims=batch_dims,
+                accumulate=accumulate,
             )
 
             # Permute result back
@@ -316,11 +319,16 @@ class ScatterOp(Operation):
             # axis == batch_dims: scatter directly at that position
             return [
                 self._scatter_at_axis(
-                    x, indices, updates, axis=axis, batch_dims=batch_dims
+                    x, indices, updates, axis=axis, batch_dims=batch_dims,
+                    accumulate=accumulate,
                 )
             ]
         else:
-            return [self._scatter_at_axis(x, indices, updates, axis=axis, batch_dims=0)]
+            return [
+                self._scatter_at_axis(
+                    x, indices, updates, axis=axis, batch_dims=0, accumulate=accumulate
+                )
+            ]
 
     def _scatter_at_axis(
         self,
@@ -330,6 +338,7 @@ class ScatterOp(Operation):
         *,
         axis: int,
         batch_dims: int,
+        accumulate: bool = False,
     ) -> TensorValue:
         """Core scatter_nd implementation for a given physical axis.
 
@@ -337,8 +346,8 @@ class ScatterOp(Operation):
         (including batch dims), then uses scatter_nd with those coordinates.
         """
         from max.dtype import DType
-        from max.graph import DeviceRef
 
+        scatter_nd = ops.scatter_nd_add if accumulate else ops.scatter_nd
         indices_shape = list(indices.shape)
 
         # Leading dims: everything before the scatter axis in x
@@ -354,14 +363,14 @@ class ScatterOp(Operation):
             if idx.dtype != DType.int64:
                 idx = ops.cast(idx, DType.int64)
             idx = ops.reshape(idx, list(indices_shape) + [1])
-            return ops.scatter_nd(x, updates, idx)
+            return scatter_nd(x, updates, idx)
 
         coord_list = []
 
         # Build coordinate for each leading dimension (including batch dims)
         for d in range(axis):
             dim_size = int(x.shape[d])
-            coord = ops.range(0, dim_size, 1, dtype=DType.int64, device=DeviceRef.CPU())
+            coord = ops.range(0, dim_size, 1, dtype=DType.int64, device=indices.device)
             shape = [1] * len(full_shape)
             shape[d] = dim_size
             coord = ops.reshape(coord, shape)
@@ -387,7 +396,7 @@ class ScatterOp(Operation):
         coord_list.append(idx)
 
         stacked = ops.stack(coord_list, axis=-1)
-        return ops.scatter_nd(x, updates, stacked)
+        return scatter_nd(x, updates, stacked)
 
     def vjp_rule(
         self, primals: OpArgs, cotangents: OpArgs, outputs: OpArgs, kwargs: OpKwargs
@@ -397,7 +406,10 @@ class ScatterOp(Operation):
         axis = kwargs.get("axis", 0)
         from ..creation import zeros_like
 
-        gx = scatter(cotangents[0], indices, zeros_like(updates), axis=axis)
+        if kwargs.get("accumulate", False):
+            gx = cotangents[0]
+        else:
+            gx = scatter(cotangents[0], indices, zeros_like(updates), axis=axis)
         g_updates = gather(cotangents[0], indices, axis=axis)
 
         return [gx, None, g_updates]
@@ -409,6 +421,8 @@ class ScatterOp(Operation):
         _x, indices, _updates = primals[0], primals[1], primals[2]
         tx, _, t_updates = tangents[0], tangents[1], tangents[2]
         axis = kwargs.get("axis", 0)
+        if kwargs.get("accumulate", False):
+            return [scatter_add(tx, indices, t_updates, axis=axis)]
         return [scatter(tx, indices, t_updates, axis=axis)]
 
     def sharding_rule(
@@ -502,3 +516,27 @@ def scatter(x: Tensor, indices: Tensor, updates: Tensor, axis: int = 0) -> Tenso
     indices = ensure_tensor(indices)
     updates = ensure_tensor(updates)
     return _scatter_op([x, indices, updates], {"axis": axis})[0]
+
+
+def scatter_add(x: Tensor, indices: Tensor, updates: Tensor, axis: int = 0) -> Tensor:
+    """Add *updates* into *x* at *indices* along *axis*, summing where indices repeat.
+
+    Functional (out-of-place). Equivalent to ``numpy.add.at(x.copy(), indices, updates)``
+    along *axis*, and the adjoint of :func:`gather`.
+
+    Args:
+        x: Base tensor the updates are added to.
+        indices: Integer index tensor specifying where to add.
+        updates: Values to add. Must be compatible with
+            ``x.shape[:axis] + indices.shape + x.shape[axis+1:]``.
+        axis: Axis along which to scatter. Default: ``0``.
+
+    Returns:
+        New tensor equal to *x* plus every update at its index.
+    """
+    from ..base import ensure_tensor
+
+    x = ensure_tensor(x)
+    indices = ensure_tensor(indices)
+    updates = ensure_tensor(updates)
+    return _scatter_op([x, indices, updates], {"axis": axis, "accumulate": True})[0]

@@ -30,6 +30,7 @@ from .complex import (
 from .indexing import (
     gather,
     scatter,
+    scatter_add,
     take,
 )
 from .shape import (
@@ -61,6 +62,7 @@ __all__ = [
     "gather",
     "take",
     "scatter",
+    "scatter_add",
     "flatten",
     "rebind",
     "as_interleaved_complex",
