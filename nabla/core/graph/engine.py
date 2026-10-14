@@ -611,9 +611,9 @@ class ComputeGraph:
             self.graph.output(seed_out, *all_graph_values)
 
         # Optimize and compile
-        module = _core.Operation._from_cmlir(self.graph._module.operation)
+        module = self.graph._module
         _debug_eval("miss: lowering graph")
-        _core.lower(module, [builtin.passes.RemoveDeadValues()])
+        _core.lower(module, [builtin.passes.RemoveDeadValuesPass()])
         _debug_eval("miss: removing unused arguments")
         _remove_unused_arguments(self.graph)
 
