@@ -590,10 +590,10 @@ def _like_helper(
     from ..core import Tensor
 
     if not isinstance(x, Tensor):
-        return create_fn(*extra_args, x.shape, dtype=x.dtype, device=x.device)
+        return create_fn(x.shape, *extra_args, dtype=x.dtype, device=x.device)
 
     shape = x.physical_global_shape
-    res = create_fn(*extra_args, shape, dtype=x.dtype, device=x.device)
+    res = create_fn(shape, *extra_args, dtype=x.dtype, device=x.device)
     res.batch_dims = x.batch_dims
 
     if x.sharding:
